@@ -1,25 +1,51 @@
 import os
+import json
 import pandas as pd
 import datetime
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler, ConversationHandler
 
 # --- Настройки ---
 TOKEN = "7651891622:AAHT4Tgs8E5DByxGGTfzaMaFCrWc_WX3DGo"
 STOCK_FILE = "stock.xlsx"
 STATS_FILE = "stats.xlsx"
+ROLES_FILE = "user_roles.json"  # Файл для хранения ролей
 
 # --- Клавиатура ---
 reply_markup = ReplyKeyboardMarkup([['Поиск']], resize_keyboard=True)
 
-# --- Роли пользователей ---
-ADMINS = [123456789]
-SELLERS = [987654321]
-BUYERS = [555555555]
+# --- Роли и админ ---
+ADMIN_ID = 1303430775  # Ваш Telegram ID админа (замените на свой)
 MARKUP_PERCENTAGE = 30
 
-# --- Переменные состояний для ConversationHandler ---
+# --- Состояния для ConversationHandler ---
 ORDER_ARTICLE, ORDER_QUANTITY, ORDER_FIO, ORDER_PHONE, ORDER_ADDRESS = range(5)
+
+# --- Работа с ролями ---
+if os.path.exists(ROLES_FILE):
+    with open(ROLES_FILE, "r", encoding="utf-8") as f:
+        user_roles = json.load(f)
+else:
+    user_roles = {}
+
+def save_roles():
+    with open(ROLES_FILE, "w", encoding="utf-8") as f:
+        json.dump(user_roles, f, ensure_ascii=False, indent=2)
+
+def get_role(user_id):
+    user_id = str(user_id)
+    if user_id not in user_roles:
+        # Новый пользователь — автоматически покупатель
+        user_roles[user_id] = "buyer"
+        save_roles()
+    return user_roles[user_id]
+
+def set_role(user_id, role):
+    user_roles[str(user_id)] = role
+    save_roles()
+
+def is_admin(user_id):
+    return user_id == ADMIN_ID
 
 # --- Работа с Excel ---
 def load_stock():
@@ -50,28 +76,20 @@ def search_item(query, df):
     )
     return df[mask]
 
-def user_role(user_id):
-    if user_id in ADMINS:
-        return 'admin'
-    elif user_id in SELLERS:
-        return 'seller'
-    elif user_id in BUYERS:
-        return 'buyer'
-    else:
-        return 'guest'
-
 # --- Команды ---
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    role = user_role(user_id)
+    role = get_role(user_id)
     if role == 'buyer':
         await update.message.reply_text("Добро пожаловать в наш магазин! Нажмите «Поиск» для поиска товара.", reply_markup=reply_markup)
+    elif role == 'admin':
+        await update.message.reply_text("Здравствуйте, админ! Нажмите «Поиск» для управления.", reply_markup=reply_markup)
     else:
-        await update.message.reply_text("Привет! Нажми «Поиск» и введи запрос.", reply_markup=reply_markup)
+        await update.message.reply_text(f"Привет! Ваша роль: {role}. Нажмите «Поиск» и введите запрос.", reply_markup=reply_markup)
 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    role = user_role(user_id)
+    role = get_role(user_id)
     text = update.message.text.strip()
 
     if text.lower() == 'поиск':
@@ -92,9 +110,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             message = f"{r['Наименование']} (Артикул: {r['Артикул']})\nЦена: {price}₽"
 
             if role in ['admin', 'seller']:
-                message += (
-                    f"\nОстаток: {r['Количество']}\nМестоположение: {r['Местоположение']}"
-                )
+                message += f"\nОстаток: {r['Количество']}\nМестоположение: {r['Местоположение']}"
 
             buttons = []
             if role == 'admin':
@@ -102,8 +118,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     InlineKeyboardButton("Продать", callback_data=f"sell_{r['Артикул']}"),
                     InlineKeyboardButton("Установить", callback_data=f"install_{r['Артикул']}")
                 ]]
-
-            if role == 'buyer':
+            elif role == 'buyer':
                 buttons = [[InlineKeyboardButton("Оформить заказ", callback_data=f"order_{r['Артикул']}")]]
 
             await update.message.reply_text(message, reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
@@ -154,6 +169,11 @@ async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # --- Продажа, установка и добавление ---
 async def sell(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("Команда доступна только администратору.")
+        return
+
     args = ctx.args
     if len(args) < 2:
         await update.message.reply_text("Использование: /sell <артикул> <количество>")
@@ -171,6 +191,11 @@ async def sell(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Продано {qty} шт. товара {article}.")
 
 async def install(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("Команда доступна только администратору.")
+        return
+
     args = ctx.args
     if len(args) < 2:
         await update.message.reply_text("Использование: /install <артикул> <количество>")
@@ -188,6 +213,11 @@ async def install(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Установлено {qty} шт. товара {article}.")
 
 async def add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("Команда доступна только администратору.")
+        return
+
     args = ctx.args
     if len(args) < 2:
         await update.message.reply_text("Использование: /add <артикул> <количество>")
@@ -203,6 +233,26 @@ async def add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     save_stock(df)
     log_transaction(article, qty, "Пополнение")
     await update.message.reply_text(f"Добавлено {qty} шт. товара {article} на склад.")
+
+# --- Управление ролями ---
+async def role(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("Команда доступна только администратору.")
+        return
+
+    args = ctx.args
+    if len(args) < 2:
+        await update.message.reply_text("Использование: /role <user_id> <role>\nРоли: admin, seller, buyer, guest")
+        return
+
+    target_id, new_role = args[0], args[1].lower()
+    if new_role not in ['admin', 'seller', 'buyer', 'guest']:
+        await update.message.reply_text("Неверная роль. Возможные: admin, seller, buyer, guest")
+        return
+
+    set_role(target_id, new_role)
+    await update.message.reply_text(f"Роль пользователя {target_id} установлена на {new_role}.")
 
 # --- Запуск ---
 def main():
@@ -222,6 +272,7 @@ def main():
     app.add_handler(CommandHandler("sell", sell))
     app.add_handler(CommandHandler("install", install))
     app.add_handler(CommandHandler("add", add))
+    app.add_handler(CommandHandler("role", role))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(conv_handler)
@@ -231,3 +282,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
